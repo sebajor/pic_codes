@@ -1,0 +1,300 @@
+/*This package need to be feed by an UART working at 57600
+ */
+#ifndef __UART_LIB__
+#include "uart_lib.h"
+#endif
+#include "zfm_constants.h"
+
+////
+//// CHANGE THE CODE TO HAVE A STATIC ARRAY AS INPUT OF THE 
+//// READ FUNCTIONS!!! WE CANT RETURN AN ARRAY FROM A MEMORY
+//// UNALLOCATED
+////
+
+
+int zfm_request(unsigned char *data, unsigned char size){
+    UART_char((ZFM_HEAD&0xFF00)>>8);
+    UART_char(ZFM_HEAD&0xFF);
+    for(char i=0; i<4; i++){
+        UART_char(0xFF);            //if the ADDR is ffffffff..
+        //UART_char(char(ZFM_ADDR>>(8*(4-i))&0xFF)); //this is the right way
+    }
+    for(char i=0; i<size; i++){
+        UART_char(*(data+i));
+    }        
+    return 1;
+}
+
+
+unsigned char * zfm_read_response(char size){
+    //MAYBE I HAVE TO MODIFY THIS ONE!!
+    
+    
+    //modify this to accept a pointer where the data
+    //would be store!!!
+    
+    //we are going to try read the response 
+    //for a proper number of cycles
+    //However the response is not fixed in its len
+    //we set a maximum value of 10 bytes...
+    unsigned char array_size = 20;
+    unsigned int count = 0;
+    unsigned char reads = 0;
+    char recv[array_size+2];
+    recv[array_size+1]=0;     //state..if its 1 the reading fails
+    recv[array_size] = size;
+    while(reads <size){
+        if(PIR1bits.RCIF){
+         recv[reads]=RCREG;
+         //RCREG has 2 bytes of buffer.. check this!
+         reads++;
+         count = 0;
+        }
+        else{
+            count++;
+        }
+        
+        if(count==0xFFFFFF){
+            recv[array_size+1] = 1; //
+            break;
+        }
+    }
+    return recv;
+}
+
+unsigned char zfm_check_recv(unsigned char * recv){
+    //I HAVE TO REVIEW THIS!!!!
+    unsigned char size = *(recv+20);
+    if(*(recv+21)){
+        return 1;
+    }
+    short pkt_checksum = (recv[size-2]<<8)+recv[size-1]; //REVIEW!!!!
+    unsigned char pid = recv[6];
+    short pkt_len = (recv[7]<<8)+recv[8];
+    unsigned char code = recv[9];
+    short man_checksum = (short)(pid+pkt_len+code);
+    if(man_checksum!=pkt_checksum){
+        return 1;
+    }
+    else{
+        return 0;
+    }
+};
+
+unsigned char zfm_typical_req(unsigned char * req_code){
+    //template of a typical request
+    zfm_request(req_code, 6);
+    __delay_ms(1);
+    unsigned char *recv = zfm_read_response(12);
+    unsigned char valid = zfm_check_recv(recv);
+    if(valid){
+        return 1;
+    }
+    else{
+        return *(recv+9);
+    }
+}
+
+///high level functions
+//first the easy ones...
+//Check if the 9 bit is the actually the code confirmation...
+//I have to check if the functions zfm_request works for every 
+//datasize ---> I think it shouldnt...
+
+
+unsigned char zfm_det_finger(){
+    //Detect the finger presence
+    //0 : finger detected
+    //1 : error receiving packet
+    //2 : no finger detected
+    //3 : fail collecting the finger 
+    unsigned char code_response = zfm_typical_req(_zfm_det_finger);
+    return code_response;
+}
+
+unsigned char zfm_light_on(){
+    //The confirmation code is in the 10 byte and
+    // 00H means success.
+    zfm_request(_zfm_light_on,6);
+    __delay_ms(5);
+    unsigned char *recv = zfm_read_response(12);
+    unsigned char valid = zfm_check_recv(recv);
+    return *(recv+9)| valid;
+}
+  
+unsigned char zfm_light_off(){
+    //The confirmation code is in the 10 byte and
+    //00H means success
+    zfm_request(_zfm_light_off,6);
+    __delay_ms(5);
+    unsigned char *recv = zfm_read_response(12);
+    unsigned char valid = zfm_check_recv(recv);
+    return *(recv+9)| valid;
+}
+
+unsigned char zfm_capture_finger(){
+    //Detect the finger presence, needs the light on
+    //0 : finger detected
+    //1 : error receiving packet
+    //2 : no finger detected
+    //3 : fail collecting the finger 
+    unsigned char code_response = zfm_typical_req(_zfm_capt_finger);
+    return code_response;
+}
+
+unsigned char zfm_handshake(){
+    //check the status of the sensor
+    //55H means everything is right
+    unsigned char code_response = zfm_typical_req(_zfm_handshake);
+    return code_response;
+}
+
+unsigned char zfm_gen_chars(unsigned char buff_n){
+    //Generate the features of the image collected
+    //and saves it in one buff_n
+    // 0x00 : generate feats complete!
+    // 0x01 : error receiving package
+    // 0x06 : fail to generate the feats because bad image
+    // 0x07 : fail to generate the feats because bad image
+    // 0x15 : fail to generate the feats because no image
+    
+    
+    //FIX!!! THE CODE HAS 7 BYTES !!!!
+    unsigned char code_response;
+    if(buff_n==2){
+        code_response = zfm_typical_req(_zfm_gen_chars2);
+    }
+    else{
+        code_response = zfm_typical_req(_zfm_gen_chars1);
+    }
+    return code_response;
+}
+
+unsigned char zfm_store_chars(unsigned char bufferID, unsigned short pageID){
+    //save the features of one image, before you had to have made the 
+    //finger capture and the generation of features..
+    //bufferID: buffer where the features are store
+    //PageID: in which page I want to store the data--->Would be the same 
+    //when you issue the search command. Possible returns are:
+    //0x00 : success
+    //0x01 : error receiving the package
+    //0x0b : addr is beyond pageID finger library
+    //0x18 : error writing the flash memory..
+    
+    unsigned short checksum;
+    unsigned char storing_msg[9];
+    for(char i=0; i<4; i++){
+        storing_msg[i] = _zfm_store_char[i];
+    }
+    storing_msg[4] = bufferID;
+    storing_msg[5] = (char)((pageID & 0xFF00)>>8);
+    storing_msg[6] = (char)(pageID & 0xFF);
+    checksum = 1+6+6+bufferID+pageID;
+    storing_msg[7] = (char)((checksum&0xFF00)>>8);
+    storing_msg[8] = (char)((checksum&0xFF));
+    //unsigned char code_response = zfm_typical_req(storing_msg);
+    //the typical req doesnt work... we need to send 9 bytes..
+    zfm_request(storing_msg, 9);
+    __delay_ms(1);
+    unsigned char *recv = zfm_read_response(12);
+    unsigned char valid = zfm_check_recv(recv);
+    if(valid){
+        return 1;
+    }
+    else{
+        return *(recv+9);
+    }
+}
+
+
+unsigned char zfm_delete(unsigned short pageID){
+    //Delete one finger in pageID
+    //0x00 : delete success
+    //0x01 : error receiving the pack
+    //0x10 : fail delete
+    
+    unsigned short checksum;
+    unsigned char del_msg[10];
+    for(char i=0; i<4; i++){
+        del_msg[i] = _zfm_delete[i];
+    }
+    del_msg[4] = (char) ((pageID&0xFF00)>>8);
+    del_msg[5] = (char)(pageID&0xFF);
+    del_msg[6] = 0x00;
+    del_msg[7] = 0x01;
+    checksum = 1+7+12+pageID+1;
+    del_msg[8] = (char) ((checksum&0xFF00)>>8);
+    del_msg[9] = (char) ((checksum&0xFF));
+    zfm_request(del_msg, 10);
+    __delay_ms(1);
+    unsigned char *recv = zfm_read_response(12);
+    unsigned char valid = zfm_check_recv(recv);
+    if(valid){
+        return 1;
+    }
+    else{
+        return *(recv+8);
+    }
+}
+
+unsigned short * zfm_search(unsigned char buffID, unsigned short start, unsigned short n){
+    //search the template in buffID in the memory, It looks from start:start+n
+    //0x00 : Match found
+    //0x01 : error reciving package
+    //0x09 : no maching
+    unsigned char msg[11];
+    unsigned short checksum;
+    for(unsigned char i=0; i<4; i++){
+        msg[i] = _zfm_search[i];
+    }
+    msg[4] = buffID;
+    msg[5] = (char)((start&0xFF00)>>8);
+    msg[6] = (char)(start&0xFF);
+    msg[7] = (char)((n&0xFF00)>>8);
+    msg[8] = (char)(n&0xFF);
+    checksum = 1+8+4+buffID+start+n;
+    msg[9] = (char)((checksum&0xFF00)>>8);
+    msg[10] = (char)(checksum&0xFF);
+    zfm_request(msg, 11);
+    __delay_ms(1);
+    
+    unsigned short output[2] = {1,1};
+    unsigned char *recv = zfm_read_response(16);
+    unsigned char valid = zfm_check_recv(recv);
+    if(valid){
+        return output;
+    }
+    else{
+        output[0] = (short)recv[9];
+        output[1] = (short)(recv[10]<<8+recv[11]);
+        return output;
+    }
+}
+
+
+
+unsigned char zfm_delete_all(){
+    unsigned char code_response = zfm_typical_req(_zfm_delete_all);
+    return code_response;
+}
+
+
+
+unsigned char zfm_compare(){
+    //Compare the feats in buff1 and buff2
+    //0x00 :Buffers match!
+    //0x01 :error receiving the packge
+    //0x08 :templates of the two buffs doesnt match
+    zfm_request(_zfm_compare, 6);
+    __delay_ms(1);
+    unsigned char *recv = zfm_read_response(14);
+    unsigned char valid = zfm_check_recv(recv);
+    if(valid){
+        return 1;
+    }
+    else{
+        return *(recv+9);
+    }
+}
+
+
